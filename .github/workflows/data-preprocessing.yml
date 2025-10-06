@@ -11,7 +11,7 @@ on:
       lookback_hours:
         description: 'Hours to look back for orders'
         required: false
-        default: '24'
+        default: '720'
 
 jobs:
   preprocess:
@@ -37,7 +37,7 @@ jobs:
         env:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '24' }}
+          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '720' }}
           BATCH_SIZE: '50'
           MAX_WORKERS: '5'
         run: |

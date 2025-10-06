@@ -42,7 +42,7 @@ ORDERS_COLLECTION = "orders"
 CUSTOMERS_COLLECTION = "customers"
 TARGET_COLLECTION = "ai_insight"
 
-LOOKBACK_HOURS = int(os.getenv("LOOKBACK_HOURS", "24"))
+LOOKBACK_HOURS = int(os.getenv("LOOKBACK_HOURS", "720"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "10"))
 PROCESS_PAID_ONLY = os.getenv("PROCESS_PAID_ONLY", "false").lower() == "true"
