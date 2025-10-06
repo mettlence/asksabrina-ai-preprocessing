@@ -11,12 +11,12 @@ on:
       lookback_hours:
         description: 'Hours to look back for orders'
         required: false
-        default: '720'
+        default: '24'
 
 jobs:
   preprocess:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     
     steps:
       - name: Checkout code
@@ -37,7 +37,7 @@ jobs:
         env:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '720' }}
+          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '24' }}
           BATCH_SIZE: '50'
           MAX_WORKERS: '5'
         run: |
