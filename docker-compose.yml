@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  preprocessor:
+    build: .
+    environment:
+      - MONGODB_URI=${MONGODB_URI}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LOOKBACK_HOURS=${LOOKBACK_HOURS:-720}
+      - BATCH_SIZE=${BATCH_SIZE:-50}
+      - MAX_WORKERS=${MAX_WORKERS:-5}
+    volumes:
+      - ./preprocess.log:/app/preprocess.log
+    restart: "no"
