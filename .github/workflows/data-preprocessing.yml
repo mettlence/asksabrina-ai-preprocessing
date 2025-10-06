@@ -74,6 +74,15 @@ jobs:
     if: success()
     
     steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pymongo
+        run: |
+          pip install pymongo
+
       - name: Verify processing
         env:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
@@ -86,18 +95,14 @@ jobs:
           client = MongoClient(os.environ['MONGODB_URI'])
           db = client['development']
           
-          # Check recent processing
           recent = db.ai_insight.count_documents({
             'processed_at': {'\$gte': datetime.utcnow() - timedelta(hours=1)}
           })
-          
           print(f'Recently processed records: {recent}')
           
-          # Check for errors in last 24h
           total_24h = db.ai_insight.count_documents({
             'processed_at': {'\$gte': datetime.utcnow() - timedelta(hours=24)}
           })
-          
           print(f'Total processed in last 24h: {total_24h}')
           
           client.close()
