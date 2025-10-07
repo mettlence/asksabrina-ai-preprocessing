@@ -49,7 +49,7 @@ LOOKBACK_HOURS = int(os.getenv("LOOKBACK_HOURS", "720"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "10"))
 PROCESS_PAID_ONLY = os.getenv("PROCESS_PAID_ONLY", "false").lower() == "true"
-SKIP_UNCHANGED = os.getenv("SKIP_UNCHANGED", "false").lower() == "true"
+SKIP_UNCHANGED = os.getenv("SKIP_UNCHANGED", "true").lower() == "true"
 
 # -----------------------------
 # MongoDB setup with connection pooling
@@ -498,6 +498,7 @@ def main():
         
         if not orders:
             logger.info("No new orders to process")
+            send_slack_notification("ℹ️ *No new orders to process*")
             return
 
         logger.info(f"Processing {len(orders)} orders...")
