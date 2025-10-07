@@ -11,6 +11,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import hashlib
+from dateutil import parser
 
 # -----------------------------
 # Logging setup
@@ -69,9 +70,12 @@ try:
     ai_insight.create_index("source_id", unique=True)
     ai_insight.create_index("processed_at")
     ai_insight.create_index("customer_id")
-    ai_insight.create_index("content_hash")  # New: for detecting changes
+    ai_insight.create_index("content_hash")
+    ai_insight.create_index("reference_date")
+    ai_insight.create_index("payment_date")
     orders_col.create_index("createdAt")
     orders_col.create_index("paymentStatus")
+    orders_col.create_index("paymentDate")
     logger.info("Database indexes created/verified")
 except Exception as e:
     logger.warning(f"Index creation warning: {e}")
@@ -79,7 +83,23 @@ except Exception as e:
 # -----------------------------
 # OpenAI client
 # -----------------------------
-openai = OpenAI(api_key=os.getenv(OPENAI_API_KEY))
+openai = OpenAI(api_key=OPENAI_API_KEY)
+
+
+# -----------------------------
+# Date parsing helper
+# -----------------------------
+def parse_date(date_value) -> Optional[datetime]:
+    """Convert string date to datetime object, handle various formats."""
+    if isinstance(date_value, datetime):
+        return date_value
+    if isinstance(date_value, str):
+        try:
+            return parser.parse(date_value)
+        except Exception as e:
+            logger.warning(f"Failed to parse date: {date_value}, error: {e}")
+            return None
+    return None
 
 
 # -----------------------------
@@ -87,7 +107,6 @@ openai = OpenAI(api_key=os.getenv(OPENAI_API_KEY))
 # -----------------------------
 def generate_content_hash(order: Dict) -> str:
     """Generate hash of order content to detect changes."""
-    # Include fields that matter for insights
     content = {
         "questions": order.get("question", []),
         "tarot_cards": order.get("tarotCards", []),
@@ -101,16 +120,40 @@ def generate_content_hash(order: Dict) -> str:
 # Get unprocessed orders
 # -----------------------------
 def get_unprocessed_orders() -> List[Dict]:
-    """Fetch orders that need processing."""
+    """Fetch orders that need processing with smart date handling."""
     try:
         since = datetime.utcnow() - timedelta(hours=LOOKBACK_HOURS)
         
-        # Build match criteria
-        match_criteria = {"createdAt": {"$gte": since}}
+        # Smart match criteria for paid/unpaid orders
+        match_criteria = {
+            "$or": [
+                # Paid orders with recent payment date
+                {
+                    "paymentStatus": 1,
+                    "paymentDate": {"$exists": True, "$gte": since}
+                },
+                # Paid orders recently created
+                {
+                    "paymentStatus": 1,
+                    "createdAt": {"$gte": since}
+                },
+                # Unpaid orders recently created
+                {
+                    "paymentStatus": {"$ne": 1},
+                    "createdAt": {"$gte": since}
+                }
+            ]
+        }
         
         # Optional: Only process paid orders
         if PROCESS_PAID_ONLY:
-            match_criteria["paymentStatus"] = 1
+            match_criteria = {
+                "paymentStatus": 1,
+                "$or": [
+                    {"paymentDate": {"$exists": True, "$gte": since}},
+                    {"createdAt": {"$gte": since}}
+                ]
+            }
             logger.info("Processing PAID ORDERS ONLY (paymentStatus=1)")
         
         # Aggregation pipeline
@@ -130,6 +173,9 @@ def get_unprocessed_orders() -> List[Dict]:
                 "has_processed": {"$gt": [{"$size": "$processed"}, 0]},
                 "existing_hash": {
                     "$arrayElemAt": ["$processed.content_hash", 0]
+                },
+                "existing_payment_status": {
+                    "$arrayElemAt": ["$processed.payment_status", 0]
                 }
             }}
         ]
@@ -143,25 +189,24 @@ def get_unprocessed_orders() -> List[Dict]:
             
             for order in orders:
                 if not order.get("has_processed"):
-                    # Never processed - include
                     new_or_changed.append(order)
                 else:
-                    # Already processed - check if changed
                     current_hash = generate_content_hash(order)
                     existing_hash = order.get("existing_hash")
                     
-                    if current_hash != existing_hash:
-                        # Content changed - reprocess
+                    current_payment_status = order.get("paymentStatus", 0)
+                    existing_payment_status = order.get("existing_payment_status", 0)
+                    
+                    if current_hash != existing_hash or current_payment_status != existing_payment_status:
                         new_or_changed.append(order)
-                        logger.info(f"Order {order['_id']} changed, will reprocess")
+                        reason = "content changed" if current_hash != existing_hash else "payment status changed"
+                        logger.info(f"Order {order['_id']} {reason}, will reprocess")
                     else:
-                        # No changes - skip
                         skipped += 1
             
             logger.info(f"Found {len(new_or_changed)} orders to process ({skipped} unchanged, skipped)")
             return new_or_changed
         else:
-            # Process all unprocessed
             unprocessed = [o for o in orders if not o.get("has_processed")]
             logger.info(f"Found {len(unprocessed)} unprocessed orders")
             return unprocessed
@@ -300,13 +345,27 @@ def process_order(order: Dict, customer_cache: Dict[str, Dict]) -> Optional[Dict
         # Generate AI insights
         insights = generate_insights(raw_text, customer_info)
 
+        # Handle dates - ensure all are datetime objects
+        payment_status = order.get("paymentStatus", 0)
+        created_at = parse_date(order.get("createdAt"))
+        payment_date_raw = order.get("paymentDate")
+        payment_date = parse_date(payment_date_raw) if payment_date_raw else None
+        
+        # Determine reference_date (smart date for analytics)
+        if payment_status == 1 and payment_date:
+            reference_date = payment_date
+        else:
+            reference_date = created_at
+
         # Build enriched record
         enriched_doc = {
             "source_id": str(order_id),
             "customer_id": str(customer_id) if customer_id else None,
             "order_id": order.get("orderId"),
-            "created_at": order.get("createdAt"),
-            "payment_status": order.get("paymentStatus", 0),
+            "created_at": created_at,
+            "payment_date": payment_date,
+            "reference_date": reference_date,
+            "payment_status": payment_status,
             "product_id": str(order.get("productId")) if order.get("productId") else None,
             "total_price": order.get("totalPrice"),
             "questions": questions,
@@ -320,10 +379,10 @@ def process_order(order: Dict, customer_cache: Dict[str, Dict]) -> Optional[Dict
             "emotional_tone": insights.get("emotional_tone", []),
             "insight_tags": insights.get("insight_tags", []),
             "possible_needs": insights.get("possible_needs", []),
-            "content_hash": content_hash,  # Store hash for future comparison
+            "content_hash": content_hash,
             "processed_at": datetime.utcnow(),
             "embedding_model": "text-embedding-3-small",
-            "pipeline_version": "v2.1",
+            "pipeline_version": "v2.2",
         }
 
         logger.info(f"Successfully processed order {order_id}")
