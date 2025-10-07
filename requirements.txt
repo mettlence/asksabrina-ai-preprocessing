@@ -1,7 +1,7 @@
 pymongo==4.6.1
 openai>=1.40
 python-dotenv==1.0.1
-httpx<0.28
+httpx<0.29
 httpcore<1.0
 python-dateutil>=2.8.2
 requests==2.31.0
