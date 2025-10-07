@@ -1,4 +1,4 @@
-pymongo==4.6.1
+pymongo==4.15.2
 openai>=1.40
 python-dotenv==1.0.1
 httpx<0.28
