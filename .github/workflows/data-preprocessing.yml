@@ -37,6 +37,7 @@ jobs:
         env:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '720' }}
           BATCH_SIZE: '50'
           MAX_WORKERS: '5'
