@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import hashlib
 from dateutil import parser
+import requests
 
 # -----------------------------
 # Logging setup
@@ -33,6 +34,7 @@ load_dotenv()
 
 MONGODB_URI = os.environ.get("MONGODB_URI")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 
 if not MONGODB_URI or not OPENAI_API_KEY:
     logger.error("Missing required environment variables")
@@ -47,7 +49,7 @@ LOOKBACK_HOURS = int(os.getenv("LOOKBACK_HOURS", "720"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "10"))
 PROCESS_PAID_ONLY = os.getenv("PROCESS_PAID_ONLY", "false").lower() == "true"
-SKIP_UNCHANGED = os.getenv("SKIP_UNCHANGED", "true").lower() == "true"
+SKIP_UNCHANGED = os.getenv("SKIP_UNCHANGED", "false").lower() == "true"
 
 # -----------------------------
 # MongoDB setup with connection pooling
@@ -84,6 +86,29 @@ except Exception as e:
 # OpenAI client
 # -----------------------------
 openai = OpenAI(api_key=OPENAI_API_KEY)
+
+
+# -----------------------------
+# Slack notification
+# -----------------------------
+def send_slack_notification(message: str, is_error: bool = False):
+    """Send notification to Slack."""
+    if not SLACK_WEBHOOK_URL:
+        return
+    
+    try:
+        color = "#FF0000" if is_error else "#36a64f"
+        payload = {
+            "attachments": [{
+                "color": color,
+                "text": message,
+                "footer": "AI Preprocessing Pipeline",
+                "ts": int(datetime.utcnow().timestamp())
+            }]
+        }
+        requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=5)
+    except Exception as e:
+        logger.warning(f"Failed to send Slack notification: {e}")
 
 
 # -----------------------------
@@ -500,9 +525,26 @@ def main():
             logger.info(f"Average: {duration/len(orders):.2f} seconds per order")
         
         logger.info("=" * 60)
+        
+        # Send success notification to Slack
+        send_slack_notification(
+            f"✅ *Preprocessing Completed*\n"
+            f"• Processed: {total_processed}/{len(orders)} orders\n"
+            f"• Duration: {duration/60:.1f} minutes\n"
+            f"• Avg: {duration/len(orders):.1f}s per order"
+        )
 
     except Exception as e:
         logger.error(f"Fatal error in main pipeline: {e}", exc_info=True)
+        
+        # Send error notification to Slack
+        send_slack_notification(
+            f"❌ *Preprocessing Failed*\n"
+            f"• Error: {str(e)[:200]}\n"
+            f"• Check logs for details",
+            is_error=True
+        )
+        
         sys.exit(1)
     finally:
         mongo_client.close()
