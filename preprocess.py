@@ -94,6 +94,7 @@ openai = OpenAI(api_key=OPENAI_API_KEY)
 def send_slack_notification(message: str, is_error: bool = False):
     """Send notification to Slack."""
     if not SLACK_WEBHOOK_URL:
+        logger.warning("SLACK_WEBHOOK_URL not set, skipping notification")
         return
     
     try:
@@ -106,7 +107,11 @@ def send_slack_notification(message: str, is_error: bool = False):
                 "ts": int(datetime.utcnow().timestamp())
             }]
         }
-        requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=5)
+        response = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=5)
+        if response.status_code == 200:
+            logger.info("Slack notification sent")
+        else:
+            logger.warning(f"Slack notification failed: {response.status_code}")
     except Exception as e:
         logger.warning(f"Failed to send Slack notification: {e}")
 
