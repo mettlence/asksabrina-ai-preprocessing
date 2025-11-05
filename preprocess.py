@@ -32,17 +32,19 @@ logger = logging.getLogger(__name__)
 # -----------------------------
 load_dotenv()
 
-MONGODB_URI = os.environ.get("MONGODB_URI")
+MONGODB_SOURCE_URI = os.environ.get("MONGODB_SOURCE_URI")  # Atlas
+MONGODB_TARGET_URI = os.environ.get("MONGODB_TARGET_URI")  # EC2
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 
-if not MONGODB_URI or not OPENAI_API_KEY:
-    logger.error("Missing required environment variables")
+if not MONGODB_SOURCE_URI or not MONGODB_TARGET_URI or not OPENAI_API_KEY:
+    logger.error("Missing required environment variables (MONGODB_SOURCE_URI, MONGODB_TARGET_URI, OPENAI_API_KEY)")
     sys.exit(1)
 
 DB_NAME = "development"
 ORDERS_COLLECTION = "orders"
 CUSTOMERS_COLLECTION = "customers"
+TARGET_DB_NAME = "asksabrina"
 TARGET_COLLECTION = "ai_insight"
 
 LOOKBACK_HOURS = int(os.getenv("LOOKBACK_HOURS", "720"))
@@ -52,22 +54,36 @@ PROCESS_PAID_ONLY = os.getenv("PROCESS_PAID_ONLY", "false").lower() == "true"
 SKIP_UNCHANGED = os.getenv("SKIP_UNCHANGED", "true").lower() == "true"
 
 # -----------------------------
-# MongoDB setup with connection pooling
+# MongoDB setup - Source (Atlas) and Target (EC2)
 # -----------------------------
-mongo_client = MongoClient(
-    MONGODB_URI,
+
+# SOURCE: Atlas MongoDB (read orders & customers)
+logger.info("Connecting to SOURCE MongoDB (Atlas)...")
+source_client = MongoClient(
+    MONGODB_SOURCE_URI,
     maxPoolSize=50,
     minPoolSize=10,
     maxIdleTimeMS=45000,
     connectTimeoutMS=10000,
     serverSelectionTimeoutMS=10000
 )
-db = mongo_client[DB_NAME]
-orders_col = db[ORDERS_COLLECTION]
-customers_col = db[CUSTOMERS_COLLECTION]
-ai_insight = db[TARGET_COLLECTION]
+source_db = source_client[DB_NAME]
+orders_col = source_db[ORDERS_COLLECTION]
+customers_col = source_db[CUSTOMERS_COLLECTION]
 
-# Create indexes for better performance
+# TARGET: EC2 MongoDB (write ai_insight)
+logger.info("Connecting to TARGET MongoDB (EC2)...")
+target_client = MongoClient(
+    MONGODB_TARGET_URI,
+    maxPoolSize=20,
+    minPoolSize=5,
+    connectTimeoutMS=10000,
+    serverSelectionTimeoutMS=10000
+)
+target_db = target_client[TARGET_DB_NAME]
+ai_insight = target_db[TARGET_COLLECTION]
+
+# Create indexes on TARGET only
 try:
     ai_insight.create_index("source_id", unique=True)
     ai_insight.create_index("processed_at")
@@ -75,10 +91,7 @@ try:
     ai_insight.create_index("content_hash")
     ai_insight.create_index("reference_date")
     ai_insight.create_index("payment_date")
-    orders_col.create_index("createdAt")
-    orders_col.create_index("paymentStatus")
-    orders_col.create_index("paymentDate")
-    logger.info("Database indexes created/verified")
+    logger.info("Target database indexes created/verified")
 except Exception as e:
     logger.warning(f"Index creation warning: {e}")
 
@@ -150,7 +163,7 @@ def generate_content_hash(order: Dict) -> str:
 # Get unprocessed orders
 # -----------------------------
 def get_unprocessed_orders() -> List[Dict]:
-    """Fetch orders that need processing with smart date handling."""
+    """Fetch orders from SOURCE that need processing."""
     try:
         since = datetime.utcnow() - timedelta(hours=LOOKBACK_HOURS)
         
@@ -186,31 +199,25 @@ def get_unprocessed_orders() -> List[Dict]:
             }
             logger.info("Processing PAID ORDERS ONLY (paymentStatus=1)")
         
-        # Aggregation pipeline
-        pipeline = [
-            {"$match": match_criteria},
-            {"$lookup": {
-                "from": TARGET_COLLECTION,
-                "let": {"order_id": {"$toString": "$_id"}},
-                "pipeline": [
-                    {"$match": {
-                        "$expr": {"$eq": ["$source_id", "$$order_id"]}
-                    }}
-                ],
-                "as": "processed"
-            }},
-            {"$addFields": {
-                "has_processed": {"$gt": [{"$size": "$processed"}, 0]},
-                "existing_hash": {
-                    "$arrayElemAt": ["$processed.content_hash", 0]
-                },
-                "existing_payment_status": {
-                    "$arrayElemAt": ["$processed.payment_status", 0]
+        # Get processed orders from TARGET
+        processed_ids = set()
+        processed_data = {}
+        try:
+            processed_docs = ai_insight.find({}, {"source_id": 1, "content_hash": 1, "payment_status": 1})
+            for doc in processed_docs:
+                source_id = doc.get("source_id")
+                processed_ids.add(source_id)
+                processed_data[source_id] = {
+                    "content_hash": doc.get("content_hash"),
+                    "payment_status": doc.get("payment_status")
                 }
-            }}
-        ]
+            logger.info(f"Found {len(processed_ids)} already processed orders in TARGET")
+        except Exception as e:
+            logger.warning(f"Error fetching processed orders from TARGET: {e}")
         
-        orders = list(orders_col.aggregate(pipeline))
+        # Fetch orders from SOURCE
+        orders = list(orders_col.find(match_criteria))
+        logger.info(f"Found {len(orders)} orders from SOURCE matching criteria")
         
         # Filter based on SKIP_UNCHANGED setting
         if SKIP_UNCHANGED:
@@ -218,14 +225,17 @@ def get_unprocessed_orders() -> List[Dict]:
             skipped = 0
             
             for order in orders:
-                if not order.get("has_processed"):
+                order_id = str(order["_id"])
+                
+                if order_id not in processed_ids:
                     new_or_changed.append(order)
                 else:
                     current_hash = generate_content_hash(order)
-                    existing_hash = order.get("existing_hash")
+                    existing_data = processed_data.get(order_id, {})
+                    existing_hash = existing_data.get("content_hash")
                     
                     current_payment_status = order.get("paymentStatus", 0)
-                    existing_payment_status = order.get("existing_payment_status", 0)
+                    existing_payment_status = existing_data.get("payment_status", 0)
                     
                     if current_hash != existing_hash or current_payment_status != existing_payment_status:
                         new_or_changed.append(order)
@@ -237,7 +247,7 @@ def get_unprocessed_orders() -> List[Dict]:
             logger.info(f"Found {len(new_or_changed)} orders to process ({skipped} unchanged, skipped)")
             return new_or_changed
         else:
-            unprocessed = [o for o in orders if not o.get("has_processed")]
+            unprocessed = [o for o in orders if str(o["_id"]) not in processed_ids]
             logger.info(f"Found {len(unprocessed)} unprocessed orders")
             return unprocessed
             
@@ -250,7 +260,7 @@ def get_unprocessed_orders() -> List[Dict]:
 # Batch fetch customers
 # -----------------------------
 def batch_fetch_customers(customer_ids: List[ObjectId]) -> Dict[str, Dict]:
-    """Fetch multiple customers in one query."""
+    """Fetch multiple customers from SOURCE in one query."""
     try:
         customers = customers_col.find({"_id": {"$in": customer_ids}})
         return {str(c["_id"]): c for c in customers}
@@ -427,7 +437,7 @@ def process_order(order: Dict, customer_cache: Dict[str, Dict]) -> Optional[Dict
 # Batch insert to MongoDB
 # -----------------------------
 def batch_insert_insights(enriched_docs: List[Dict]) -> int:
-    """Insert multiple documents using bulk operations."""
+    """Insert multiple documents to TARGET using bulk operations."""
     if not enriched_docs:
         return 0
     
@@ -443,7 +453,7 @@ def batch_insert_insights(enriched_docs: List[Dict]) -> int:
         
         result = ai_insight.bulk_write(operations, ordered=False)
         inserted = result.upserted_count + result.modified_count
-        logger.info(f"Bulk inserted/updated {inserted} documents")
+        logger.info(f"Bulk inserted/updated {inserted} documents to TARGET")
         return inserted
     except BulkWriteError as e:
         logger.error(f"Bulk write error: {e.details}")
@@ -485,7 +495,7 @@ def main():
     """Main execution function."""
     start_time = datetime.utcnow()
     logger.info("=" * 60)
-    logger.info("Starting AI preprocessing pipeline...")
+    logger.info("Starting AI preprocessing pipeline (Atlas → EC2)...")
     logger.info(f"Lookback period: {LOOKBACK_HOURS} hours")
     logger.info(f"Batch size: {BATCH_SIZE}")
     logger.info(f"Max workers: {MAX_WORKERS}")
@@ -493,7 +503,7 @@ def main():
     logger.info(f"Skip unchanged orders: {SKIP_UNCHANGED}")
     
     try:
-        # Fetch unprocessed orders
+        # Fetch unprocessed orders from SOURCE
         orders = get_unprocessed_orders()
         
         if not orders:
@@ -503,10 +513,10 @@ def main():
 
         logger.info(f"Processing {len(orders)} orders...")
 
-        # Batch fetch all customers
+        # Batch fetch all customers from SOURCE
         customer_ids = [o.get("customerId") for o in orders if o.get("customerId")]
         customer_cache = batch_fetch_customers(customer_ids)
-        logger.info(f"Fetched {len(customer_cache)} customer records")
+        logger.info(f"Fetched {len(customer_cache)} customer records from SOURCE")
 
         # Process in batches
         total_processed = 0
@@ -553,7 +563,9 @@ def main():
         
         sys.exit(1)
     finally:
-        mongo_client.close()
+        source_client.close()
+        target_client.close()
+        logger.info("MongoDB connections closed")
 
 
 if __name__ == "__main__":
