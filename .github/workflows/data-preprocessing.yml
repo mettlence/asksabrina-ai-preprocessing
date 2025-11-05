@@ -33,9 +33,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
+      - name: Setup SSH key for EC2 tunnel
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key.pem
+          chmod 600 ~/.ssh/ec2_key.pem
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+      
+      - name: Start SSH tunnel to EC2 MongoDB
+        run: |
+          ssh -i ~/.ssh/ec2_key.pem -f -N -L 27017:localhost:27017 ubuntu@${{ secrets.EC2_HOST }}
+          sleep 5
+          echo "SSH tunnel established"
+      
       - name: Run preprocessing
         env:
-          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGODB_SOURCE_URI: ${{ secrets.MONGODB_SOURCE_URI }}
+          MONGODB_TARGET_URI: mongodb://${{ secrets.MONGO_USERNAME }}:${{ secrets.MONGO_PASSWORD }}@localhost:27017/?authSource=admin
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours || '720' }}
@@ -43,6 +57,12 @@ jobs:
           MAX_WORKERS: '5'
         run: |
           python preprocess.py
+      
+      - name: Cleanup SSH tunnel
+        if: always()
+        run: |
+          pkill -f "ssh.*27017:localhost:27017" || true
+          rm -f ~/.ssh/ec2_key.pem
       
       - name: Upload logs
         if: always()
@@ -84,16 +104,28 @@ jobs:
         run: |
           pip install pymongo
 
+      - name: Setup SSH key for EC2 tunnel
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key.pem
+          chmod 600 ~/.ssh/ec2_key.pem
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Start SSH tunnel to EC2 MongoDB
+        run: |
+          ssh -i ~/.ssh/ec2_key.pem -f -N -L 27017:localhost:27017 ubuntu@${{ secrets.EC2_HOST }}
+          sleep 5
+
       - name: Verify processing
         env:
-          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGODB_TARGET_URI: mongodb://${{ secrets.MONGO_USERNAME }}:${{ secrets.MONGO_PASSWORD }}@localhost:27017/?authSource=admin
         run: |
           python -c "
           from pymongo import MongoClient
           import os
           from datetime import datetime, timedelta
           
-          client = MongoClient(os.environ['MONGODB_URI'])
+          client = MongoClient(os.environ['MONGODB_TARGET_URI'])
           db = client['development']
           
           recent = db.ai_insight.count_documents({
@@ -108,3 +140,9 @@ jobs:
           
           client.close()
           "
+
+      - name: Cleanup SSH tunnel
+        if: always()
+        run: |
+          pkill -f "ssh.*27017:localhost:27017" || true
+          rm -f ~/.ssh/ec2_key.pem
