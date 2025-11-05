@@ -126,7 +126,7 @@ jobs:
           from datetime import datetime, timedelta
           
           client = MongoClient(os.environ['MONGODB_TARGET_URI'])
-          db = client['development']
+          db = client['asksabrina']
           
           recent = db.ai_insight.count_documents({
             'processed_at': {'\$gte': datetime.utcnow() - timedelta(hours=1)}
